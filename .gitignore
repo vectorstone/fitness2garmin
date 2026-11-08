@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Secrets & tokens — never commit
+.env
+.garmin_tokens/
+*.garmin_token*
+garmin_tokens.json
+
+# Data & generated files
+data/
+*.fit
+*.tcx
+*.gpx
+*.sqlite
+*.db
+state/
+
+# Tooling
+.DS_Store
+.uv/

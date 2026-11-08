@@ -1,65 +1,92 @@
 # fitness2garmin
 
-Apple Health（Apple Watch）完整历史 → Garmin Connect 迁移流水线。
+把 Apple Watch 的**全部历史健身数据**完整迁移到 Garmin Connect 的命令行流水线：训练活动（GPS 轨迹 + 逐秒心率 + 分段）→ 标准 FIT 文件 → 静默批量上传。
 
-**Pipeline**：`export.zip` 流式解析（workouts + GPS 路线 + 训练内心率）→ FIT 编码（官方 garmin-fit-sdk）→ python-garminconnect 静默批量上传（token 缓存、409 去重、2s 节流、SQLite 幂等账本）。
+> 完整的迁移实录（含踩坑记录）：[docs/migration-story.md](docs/migration-story.md)
 
-## Why
+## 解决什么问题
 
-- 苹果健康 App 的「导出所有健康数据」是唯一覆盖**全部历史**的导出方式；但 `export.xml` 里训练心率是粗粒度聚合，GPS 轨迹单独放在 `workout-routes/*.gpx`——本工具把它们重新拼装成每个训练一个标准 FIT 文件
-- Garmin 官方 Personal API（2026-10）是只读的；个人可用的上传通道是非官方 [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) 0.3.20+（与手机 App 同端点、支持 MFA、token 缓存后全程静默）
-- 重复上传不会被覆盖（Garmin 按开始时间返回 409），所以先 `plan` 比对、替换残缺旧数据、再增量上传
+换表（Apple Watch → Garmin）时，历史数据面临三道墙：
 
-## 已知边界
+1. **Apple 的导出不是给机器读的**：`export.xml` 里训练心率是 ~15 分钟聚合块，GPS 轨迹散落在 `workout-routes/*.gpx`，需要重新拼装
+2. **Garmin 没有官方写入通道**：Personal API 只读，网页导入只收 Fitbit CSV（每日汇总、一次一年）——训练活动进不去
+3. **重复上传会被拒绝而不是覆盖**（409）：之前导入过残缺数据的账户，盲目重传只会被挡住，需要先比对、再清理、再增量上传
 
-- **步数/睡眠/HRV 等每日指标没有任何 Garmin API 写入通道**（官方与非官方均无），本工具只迁移训练活动 + 体重（`add_body_composition`）
-- Garmin China 账户加 `--cn` 登录
-- 大规模回传时 Garmin 会限流（429），上传按 2s/文件节流；失败可重跑，账本保证幂等
+本工具一次解决：流式解析 → FIT 编码 → 与 Garmin 现有活动比对生成迁移计划 → 幂等静默上传。重复训练（如 Keep 的双写）自动折叠，残缺旧导入可安全清理。
+
+## 已验证规模
+
+真实迁移：981 条训练 → 789 条上传 + 161 条重复折叠 + 111 条无数据跳过；68 条体重记录；清理 127 条历史碎片；全程 0 失败 0 重复。
 
 ## 安装
 
 ```bash
+git clone https://github.com/vectorstone/fitness2garmin
+cd fitness2garmin
 python3 -m venv .venv && .venv/bin/pip install -e .
-# 之后所有命令用 .venv/bin/f2g
 ```
 
-## 使用（按顺序）
+要求 Python ≥ 3.12。核心依赖：官方 [garmin-fit-sdk](https://github.com/garmin/fit-python-sdk) + [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) ≥ 0.3.20。
+
+## 使用
 
 ```bash
-# 0. 把 iPhone 导出的压缩包放到 data/export.zip（健康 App → 头像 → 导出所有健康数据）
+# 0. iPhone 上：健康 App → 头像 → 导出所有健康数据，把 export.zip 放到 data/
 
-# 1. 一次性登录（终端输入密码 + MFA，token 存 data/garmin_tokens.json，之后静默）
+# 1. 一次性登录（终端输密码 + MFA 码；国区账户加 --cn）
 f2g login [--cn]
 
-# 2. 解析导出包（流式，GB 级 export.xml 不会爆内存）
-f2g parse [--zip data/export.zip]
+# 2~5. 一键跑到迁移计划（解析 → FIT → 拉取 Garmin 清单 → 比对）
+f2g sync
 
-# 3. 每个训练生成一个 FIT（data/fit/）
-f2g convert
+#    或者分步执行：
+f2g parse [--zip data/export.zip]   # export.zip → data/workouts.json（流式，GB 级不爆内存）
+f2g convert                         # 每个训练一个 FIT → data/fit/
+f2g inventory                       # Garmin 现有活动 → data/garmin_activities.json
+f2g plan                            # 迁移计划 → data/plan.json
 
-# 4. 拉取 Garmin 现有活动清单
-f2g inventory
+# 6. 清理旧导入的残缺碎片（garmin-only + 2026 前 + other 类型；先 dry-run）
+f2g clean-fragments [--apply]
 
-# 5. 生成迁移计划：upload / replace（残缺待替换）/ skip / garmin_only
-f2g plan          # 查看 data/plan.json 和报告
+# 7. 静默批量上传（409 自动跳过、429 退避重试、SQLite 账本幂等）
+f2g upload
 
-# 6. 删除 Garmin 上的残缺活动（先 dry-run 看，确认后 --apply）
-f2g clean --apply
-
-# 7. 静默批量上传（409 自动跳过、SQLite 账本去重、2s 节流）
-f2g upload --include-replace
-
-# 8. 可选：同步体重记录
+# 8. 可选：体重记录
 f2g weight
 
 # 状态总览
 f2g status
-
-# 一键跑到 plan（不删不传）
-f2g sync
 ```
 
-凭据只经终端 `getpass` 输入，token 落在 `data/`（已 gitignore），绝不进仓库。
+凭据只经终端 `getpass` 输入，token 缓存在 `data/garmin_tokens.json`（已 gitignore），首次登录后全程静默。
+
+## 迁移计划的判定逻辑
+
+`f2g plan` 对每条数据给出五种动作：
+
+| 动作 | 含义 |
+|---|---|
+| `upload` | 苹果有、Garmin 没有 → 待上传 |
+| `skip` | 已在 Garmin 且完整（开始时间 ±120s 匹配，时长/距离/轨迹一致） |
+| `replace` | 已在 Garmin 但残缺（时长差 >20% / 距离差 >30% / 苹果有轨迹而 Garmin 无）→ 删旧传新 |
+| `apple_dup` | 苹果侧重复（同类型、重叠 ≥80%，如 Keep 双写空壳）→ 折叠 |
+| `no_data` / `garmin_only` | 无法生成 FIT / Garmin 独有（手表原生活动，只报告不触碰） |
+
+## 已知限制
+
+- **步数、睡眠、HRV、每日心率无法迁移**——Garmin 没有任何（官方或非官方）写入 API，这是平台硬限制
+- 非官方 API 存在变更/限流风险；已做 2s/文件节流和 429 退避，中断可重跑
+- 无心率且无轨迹的训练无法生成 FIT（FIT 活动文件至少需要一个数据系列）
+
+## 设计概览
+
+| 模块 | 职责 |
+|---|---|
+| `apple_export.py` | 两遍流式 iterparse：训练+事件+轨迹引用+心率统计；窗口内心率挂到所有包含窗口；GPX 按引用匹配 + 时间窗兜底 |
+| `fit_builder.py` | 官方 SDK 编码 file_id/event/record/lap/session/activity；GPS 轨迹贴最近心率（±5s）；累计距离按苹果官方总距离缩放；pause/resume 切分 lap；文件名含起止时间防碰撞 |
+| `garmin_client.py` | garminconnect 封装：区服持久化（国区/全球）、token 复用、MFA、按年盘点、409→duplicate、429 退避、删除、体重 |
+| `plan.py` | 匹配与完整性判定、苹果侧孪生折叠 |
+| `state.py` | SQLite 账本，幂等重跑 |
 
 ## 测试
 
@@ -67,17 +94,7 @@ f2g sync
 .venv/bin/python tests/test_pipeline.py
 ```
 
-合成 export.zip → 解析 → JSON 往返 → FIT 编码/解码校验（记录数、sport、分段、距离缩放）→ 迁移计划比对，全链路无网络依赖。
-
-## 设计要点
-
-| 模块 | 职责 |
-|---|---|
-| `apple_export.py` | 两遍流式 iterparse：先收 workouts（含 pause/resume 事件、route 引用、HR 统计），再收窗口内心率 + 体重；GPX 按 FileReference 匹配、失配时按时间窗兜底 |
-| `fit_builder.py` | 官方 SDK 编码 file_id/event/record/lap/session/activity；GPS 轨迹上贴最近心率（±5s）；GPS 累计距离按苹果官方总距离缩放消漂移；pause/resume 切分 lap |
-| `garmin_client.py` | garminconnect 封装：token 复用、MFA、盘点（按年分页）、上传（409→duplicate）、删除、体重 |
-| `plan.py` | 开始时间 ±120s 匹配；时长差 >20%/30s 或距离差 >30% 判为残缺 → replace |
-| `state.py` | SQLite 账本，重跑幂等 |
+合成 export.zip → 解析 → JSON 往返 → FIT 编码/解码校验（记录数、sport 映射、暂停分段、距离缩放、孪生折叠）→ 迁移计划判定，全链路离线运行，不需要 Garmin 账户。
 
 ## License
 

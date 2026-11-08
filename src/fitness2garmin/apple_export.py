@@ -228,13 +228,14 @@ def _attach_hr_and_body(zf: zipfile.ZipFile, member: str, workouts: list[Workout
                 elem.clear()
                 continue
             if rtype == HR_TYPE:
+                # Attach to EVERY workout window containing the sample —
+                # overlapping twins (e.g. Keep summary + detail) must both see
+                # the data; the migration plan later picks the richer twin.
                 i = bisect_right(starts, ts) - 1
-                for j in (i, i - 1):
-                    if 0 <= j < len(windows):
-                        w = windows[j]
-                        if w.start <= ts <= w.end:
-                            w.hr.append(HRSample(ts, float(value)))
-                            break
+                while i >= 0 and windows[i].start <= ts:
+                    if windows[i].end >= ts:
+                        windows[i].hr.append(HRSample(ts, float(value)))
+                    i -= 1
             elif rtype == BODY_MASS_TYPE or rtype == BODY_FAT_TYPE:
                 unit = elem.get("unit", "kg")
                 try:

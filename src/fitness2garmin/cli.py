@@ -143,7 +143,8 @@ def cmd_plan(args):
         )
     )
     print(f"[plan] upload={counts['upload']} replace={counts['replace']} "
-          f"skip={counts['skip']} garmin-only={counts['garmin_only']}")
+          f"skip={counts['skip']} garmin-only={counts['garmin_only']} "
+          f"apple-dup={counts.get('apple_dup', 0)} no-data={counts.get('no_data', 0)}")
     for p in plan:
         if p.action == "replace":
             print(f"  replace: {p.workout.id} ({p.reason})")

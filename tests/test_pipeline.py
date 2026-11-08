@@ -70,6 +70,15 @@ def _xml() -> str:
         'sourceName="Apple Watch">'
         "</Workout>"
     )
+    # Keep-style empty twin of the run (same window, no data) — must be
+    # deduped to apple_dup by the plan.
+    shell = (
+        '<Workout workoutActivityType="HKWorkoutActivityTypeRunning" '
+        'duration="1800" startDate="2026-01-10 07:01:00 +0800" '
+        'endDate="2026-01-10 07:31:00 +0800" totalDistance="0" totalEnergyBurned="0" '
+        'sourceName="Keep">'
+        "</Workout>"
+    )
     # Gym workout has no HR in-window in this fixture on purpose? No — add some.
     gym_hr = [
         '<Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Apple Watch" '
@@ -82,7 +91,7 @@ def _xml() -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<HealthData exportDate="2026-11-08 10:00:00 +0800" locale="zh_CN">'
-        + body + "".join(hr_records) + "".join(gym_hr) + run + gym
+        + body + "".join(hr_records) + "".join(gym_hr) + run + gym + shell
         + "</HealthData>"
     )
 
@@ -117,7 +126,7 @@ def make_fixture(dirpath: Path) -> Path:
 
 
 def test_parse(workouts, body):
-    assert len(workouts) == 2, workouts
+    assert len(workouts) == 3, workouts  # run, gym, keep-shell
     run = workouts[0]
     assert run.activity_type == "HKWorkoutActivityTypeRunning"
     assert run.total_distance == 5.0
@@ -127,26 +136,30 @@ def test_parse(workouts, body):
     assert len(run.gps) == 181, len(run.gps)
     assert run.hr_avg == 150.0 and run.hr_max == 175.0
     assert [e.type for e in run.events] == ["pause", "resume"]
-    gym = workouts[1]
+    gym = workouts[2]
     assert len(gym.hr) == 2
     assert gym.gps == []
+    shell = workouts[1]
+    # attach-all: the twin sees in-window HR too (starts 07:01, so 59 not 61);
+    # the plan stage later dedupes it in favour of the richer run
+    assert shell.source == "Keep" and not shell.gps and len(shell.hr) == 59
     assert len(body) == 1 and body[0].kg == 72.5
 
 
 def test_json_roundtrip(workouts):
     data = json.loads(json.dumps(workouts_to_json(workouts)))
     back = workouts_from_json(data)
-    assert len(back) == 2
+    assert len(back) == 3
     assert back[0].id == workouts[0].id
     assert len(back[0].hr) == len(workouts[0].hr)
     assert len(back[0].gps) == len(workouts[0].gps)
-    assert back[1].activity_type == workouts[1].activity_type
+    assert back[2].activity_type == workouts[2].activity_type
 
 
 def test_fit(workouts):
     from garmin_fit_sdk import Decoder, Stream
 
-    run, gym = workouts
+    run, gym = workouts[0], workouts[2]
     for w, expect_records in ((run, 181), (gym, 2)):
         data = build_fit(w)
         path = Path(tempfile.mkdtemp()) / fit_filename(w)
@@ -188,13 +201,18 @@ def test_fit(workouts):
 def test_plan(workouts):
     # Garmin inventory: one complete match (skip), one short-duration match
     # (replace), one activity with no Apple counterpart (garmin_only).
+    # 111 matches the run completely -> skip (new top-level shape, hasPolyline)
+    # 222 matches the gym but duration mismatches -> replace (legacy summaryDTO shape)
+    # 333 has no Apple counterpart -> garmin_only
     garmin = [
         {
             "activityId": 111,
             "activityName": "Run",
             "startTimeLocal": "2026-01-10 07:00:30",
-            "summaryDTO": {"duration": 1790, "distance": 5000},
-            "activityTypeDTO": {"typeKey": "running"},
+            "duration": 1790,
+            "distance": 5000,
+            "hasPolyline": True,
+            "activityType": {"typeKey": "running"},
         },
         {
             "activityId": 222,
@@ -207,8 +225,10 @@ def test_plan(workouts):
             "activityId": 333,
             "activityName": "Old ride",
             "startTimeLocal": "2020-05-01 09:00:00",
-            "summaryDTO": {"duration": 3600, "distance": 40000},
-            "activityTypeDTO": {"typeKey": "cycling"},
+            "duration": 3600,
+            "distance": 40000,
+            "hasPolyline": True,
+            "activityType": {"typeKey": "cycling"},
         },
     ]
     plan = build_plan(workouts, garmin)
@@ -216,9 +236,9 @@ def test_plan(workouts):
     assert counts["skip"] == 1, counts
     assert counts["replace"] == 1, counts
     assert counts["garmin_only"] == 1, counts
-    # The unmatched Apple workout (none here — both matched) — with this
-    # fixture both Apple workouts match, so upload == 0.
     assert counts["upload"] == 0, counts
+    # Keep-style empty twin of the run is deduped, not uploaded
+    assert counts["apple_dup"] == 1, counts
     rep = [p for p in plan if p.action == "replace"][0]
     assert "duration" in rep.reason
 

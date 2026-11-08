@@ -98,6 +98,18 @@ class GarminGateway:
             msg = str(e)
             if "duplicate" in msg.lower() or "409" in msg:
                 return {"status": "duplicate", "detail": msg[:200]}
+            if "429" in msg or "TooManyRequests" in type(e).__name__:
+                # rate limited: back off and retry once before giving up
+                print(f"[garmin] rate limited on {fit_path.name}, waiting 60s…")
+                time.sleep(60)
+                try:
+                    resp = g.upload_activity(str(fit_path))
+                    return {"status": "uploaded", "response": _short(resp)}
+                except Exception as e2:  # noqa: BLE001
+                    msg = str(e2)
+                    if "duplicate" in msg.lower() or "409" in msg:
+                        return {"status": "duplicate", "detail": msg[:200]}
+                    raise
             raise
 
     # -- delete ------------------------------------------------------------------

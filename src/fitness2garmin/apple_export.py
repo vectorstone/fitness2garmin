@@ -142,6 +142,34 @@ def _iterparse(fh):
                         pass
 
 
+DISTANCE_TYPES = (
+    "HKQuantityTypeIdentifierDistanceWalkingRunning",
+    "HKQuantityTypeIdentifierDistanceCycling",
+    "HKQuantityTypeIdentifierDistanceSwimming",
+    "HKQuantityTypeIdentifierDistanceDownhillSnowSports",
+)
+ENERGY_TYPE = "HKQuantityTypeIdentifierActiveEnergyBurned"
+
+
+def _unit_to_km(value: float, unit: str | None) -> float:
+    if unit in ("mi", "miles"):
+        return value * 1.609344
+    if unit in ("m", "meters"):
+        return value / 1000.0
+    return value  # km (default)
+
+
+def _attr_seconds(elem) -> float:
+    """Read a duration-style attribute, honouring its unit (min/s)."""
+    raw = elem.get("duration")
+    if raw is None:
+        return 0.0
+    value = float(raw)
+    if (elem.get("durationUnit") or "s") == "min":
+        value *= 60.0
+    return value
+
+
 def _parse_workout_elem(elem) -> Workout | None:
     start = parse_dt(elem.get("startDate"))
     end = parse_dt(elem.get("endDate"))
@@ -150,6 +178,8 @@ def _parse_workout_elem(elem) -> Workout | None:
     events: list[WorkoutEvent] = []
     route_ref = None
     hr_avg = hr_max = None
+    distance_km = 0.0
+    energy_kcal = 0.0
     for child in elem:
         tag = child.tag
         if tag == "WorkoutEvent":
@@ -159,24 +189,37 @@ def _parse_workout_elem(elem) -> Workout | None:
         elif tag == "FileReference":
             route_ref = child.get("path")
         elif tag == "WorkoutStatistics":
-            if child.get("type") == HR_TYPE:
+            stype = child.get("type", "")
+            if stype == HR_TYPE:
                 hr_avg = child.get("average")
                 hr_max = child.get("maximum")
                 hr_avg = float(hr_avg) if hr_avg else None
                 hr_max = float(hr_max) if hr_max else None
+            elif stype in DISTANCE_TYPES:
+                raw = child.get("sum")
+                if raw:
+                    distance_km = _unit_to_km(float(raw), child.get("unit"))
+            elif stype == ENERGY_TYPE:
+                raw = child.get("sum")
+                if raw:
+                    energy_kcal = float(raw)
     # Route reference may also appear via metadata entries in some exports.
     if route_ref is None:
         for child in elem.iter():
             if child.tag == "FileReference":
                 route_ref = child.get("path")
                 break
+    duration = _attr_seconds(elem) or (end - start).total_seconds()
+    # Legacy export format kept distance/energy as Workout attributes.
+    legacy_dist = elem.get("totalDistance")
+    legacy_energy = elem.get("totalEnergyBurned")
     return Workout(
         activity_type=elem.get("workoutActivityType", "HKWorkoutActivityTypeOther"),
         start=start,
         end=end,
-        duration=float(elem.get("duration") or (end - start).total_seconds()),
-        total_distance=float(elem.get("totalDistance") or 0) or 0,
-        total_energy=float(elem.get("totalEnergyBurned") or 0) or 0,
+        duration=duration,
+        total_distance=distance_km or (float(legacy_dist) if legacy_dist else 0),
+        total_energy=energy_kcal or (float(legacy_energy) if legacy_energy else 0),
         source=elem.get("sourceName", ""),
         events=events,
         route_ref=route_ref,

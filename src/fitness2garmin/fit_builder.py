@@ -100,28 +100,40 @@ def _nearest_hr(hr_list, ts, tolerance_s: float = 5.0):
     return best[1] if best else None
 
 
+PAUSE_EVENTS = (
+    "pause",
+    "resume",
+    "HKWorkoutEventTypePause",
+    "HKWorkoutEventTypeResume",
+    "HKWorkoutEventTypeMotionPaused",
+    "HKWorkoutEventTypeMotionResumed",
+)
+
+
 def _laps(workout: Workout) -> list[tuple]:
     """Split the workout into (start_ts, end_ts) lap segments on pause/resume."""
     bounds = [workout.start]
     for e in workout.events:
-        if e.type in ("pause", "resume") and workout.start < e.start < workout.end:
+        if e.type in PAUSE_EVENTS and workout.start < e.start < workout.end:
             bounds.append(e.start)
     bounds.append(workout.end)
     bounds.sort()
-    # Pause/resume alternate; only keep segments that are "active".
-    # Simplest faithful model: all intervals are laps (a pause interval becomes
-    # a lap of elapsed-but-not-timer time is wrong; instead drop paused spans).
-    paused = any(e.type == "pause" for e in workout.events)
+    paused = any(
+        e.type in ("pause", "HKWorkoutEventTypePause", "HKWorkoutEventTypeMotionPaused")
+        for e in workout.events
+    )
+    PAUSE = ("pause", "HKWorkoutEventTypePause", "HKWorkoutEventTypeMotionPaused")
+    RESUME = ("resume", "HKWorkoutEventTypeResume", "HKWorkoutEventTypeMotionResumed")
     segments = []
     if paused:
         # Walk events: active from start until 'pause', from 'resume' until next
         # pause/end.
         cur = workout.start
         for e in sorted(workout.events, key=lambda e: e.start):
-            if e.type == "pause" and e.start > cur:
+            if e.type in PAUSE and e.start > cur:
                 segments.append((cur, e.start))
                 cur = None
-            elif e.type == "resume":
+            elif e.type in RESUME:
                 cur = e.start
         if cur is not None:
             segments.append((cur, workout.end))

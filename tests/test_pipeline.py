@@ -52,17 +52,22 @@ def _xml() -> str:
         '<Record type="HKQuantityTypeIdentifierBodyMass" sourceName="iPhone" unit="kg" '
         'startDate="2026-01-05 08:00:00 +0800" endDate="2026-01-05 08:00:00 +0800" value="72.5"/>'
     )
+    # 2026 export format: duration in minutes, distance/energy in WorkoutStatistics
     run = (
-        '<Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="1800" '
+        '<Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="30" '
+        'durationUnit="min" '
         f'startDate="{WORKOUT_START.strftime("%Y-%m-%d %H:%M:%S %z")}" '
         f'endDate="{WORKOUT_END.strftime("%Y-%m-%d %H:%M:%S %z")}" '
-        'totalDistance="5.0" totalEnergyBurned="350" sourceName="Apple Watch">'
+        'sourceName="Apple Watch">'
         '<WorkoutStatistics type="HKQuantityTypeIdentifierHeartRate" average="150" maximum="175" sum="9000"/>'
-        '<WorkoutEvent type="pause" startDate="2026-01-10 07:10:00 +0800"/>'
-        '<WorkoutEvent type="resume" startDate="2026-01-10 07:11:00 +0800"/>'
+        '<WorkoutStatistics type="HKQuantityTypeIdentifierDistanceWalkingRunning" sum="5.0" unit="km"/>'
+        '<WorkoutStatistics type="HKQuantityTypeIdentifierActiveEnergyBurned" sum="350" unit="Cal"/>'
+        '<WorkoutEvent type="HKWorkoutEventTypeMotionPaused" startDate="2026-01-10 07:10:00 +0800"/>'
+        '<WorkoutEvent type="HKWorkoutEventTypeMotionResumed" startDate="2026-01-10 07:11:00 +0800"/>'
         '<WorkoutRoute><FileReference path="/com.apple.health.workout-routes/route1.gpx"/></WorkoutRoute>'
         "</Workout>"
     )
+    # legacy export format (duration in seconds, totalDistance attr) for compat
     gym = (
         '<Workout workoutActivityType="HKWorkoutActivityTypeTraditionalStrengthTraining" '
         'duration="2400" startDate="2026-01-12 19:00:00 +0800" '
@@ -129,13 +134,18 @@ def test_parse(workouts, body):
     assert len(workouts) == 3, workouts  # run, gym, keep-shell
     run = workouts[0]
     assert run.activity_type == "HKWorkoutActivityTypeRunning"
-    assert run.total_distance == 5.0
+    assert run.total_distance == 5.0  # from WorkoutStatistics, not an attribute
+    assert run.total_energy == 350.0
+    assert run.duration == 1800.0  # duration="30" durationUnit="min"
     # 61 in-run HR samples; the outside one (2026-02-01) must be dropped.
     assert len(run.hr) == 61, len(run.hr)
     assert all(WORKOUT_START <= s.ts <= WORKOUT_END for s in run.hr)
     assert len(run.gps) == 181, len(run.gps)
     assert run.hr_avg == 150.0 and run.hr_max == 175.0
-    assert [e.type for e in run.events] == ["pause", "resume"]
+    assert [e.type for e in run.events] == [
+        "HKWorkoutEventTypeMotionPaused",
+        "HKWorkoutEventTypeMotionResumed",
+    ]
     gym = workouts[2]
     assert len(gym.hr) == 2
     assert gym.gps == []
@@ -188,6 +198,7 @@ def test_fit(workouts):
             session = by_kind[18][0]
             assert session.get("sport") == "running", session.get("sport")
             assert session.get("total_distance", 0) > 0
+            assert session.get("total_calories") == 350
             # pause at 07:10, resume 07:11 -> 2 active segments -> 2 laps
             assert len(by_kind[19]) == 2, len(by_kind[19])
         else:

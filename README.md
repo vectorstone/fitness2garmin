@@ -60,6 +60,40 @@ f2g status
 
 凭据只经终端 `getpass` 输入，token 缓存在 `data/garmin_tokens.json`（已 gitignore），首次登录后全程静默。
 
+## Keep 历史数据补迁
+
+如果早期用 Keep 记录运动（后来才换 Apple Watch / Garmin），Keep 导出的数据可以补迁到 Garmin，并与现有活动自动去重：
+
+```bash
+# 0. Keep App → 我 → 设置 → 数据导出，把导出目录放到 data/565994/
+#    （目录里应有 <id>.xlsx 和 bundle-<id>.zip）
+
+# 1~3. 一键：解析 → 与 Garmin 现有活动比对 → 生成 FIT
+f2g keep-sync
+
+#    或分步：
+f2g keep-parse                     # xlsx + zip → data/keep_workouts.json + 摘要 FIT
+f2g keep-plan                      # 去重比对 → data/keep_plan.json
+f2g keep-convert                   # 有心率序列的重建为带 record 的 FIT
+
+# 4. 修复垃圾时长活动（Keep 双写壳经 Apple Health 带进 Garmin 的 18~35 小时"跑步"）
+f2g keep-clean [--apply]
+
+# 5. 上传 Keep 独有活动
+f2g keep-upload [--include-replace]
+```
+
+Keep 计划的判定逻辑：
+
+| 动作 | 含义 |
+|---|---|
+| `upload` | Keep 有、Garmin 没有（如 2021 年手机记录的步行、没进 Apple Health 的健身课） |
+| `skip` | 已在 Garmin：Apple 时期经健康 App 同步的训练、Garmin 原生手表活动（含跑步机）、Apple 记为 "Other" 的健身课 |
+| `replace` | Garmin 里的双写垃圾壳（时长虚高达数十小时）→ 用 Keep 真实数据删旧传新 |
+| `junk` / `twin_ghost` | 60 秒以下无数据碎片 / Keep 自身的双写空壳 |
+
+匹配口径与苹果流水线一致：`startTimeGMT` UTC 绝对时刻 ±120s 一对一比对；带 GPS 轨迹的现有活动永不替换。心率序列在导出里没有时间戳，按训练时长均匀分布（与无 GPS 训练的距离插值同口径）。
+
 ## 迁移计划的判定逻辑
 
 `f2g plan` 对每条数据给出五种动作：
@@ -86,15 +120,18 @@ f2g status
 | `fit_builder.py` | 官方 SDK 编码 file_id/event/record/lap/session/activity；GPS 轨迹贴最近心率（±5s）；累计距离按苹果官方总距离缩放；pause/resume 切分 lap；文件名含起止时间防碰撞 |
 | `garmin_client.py` | garminconnect 封装：区服持久化（国区/全球）、token 复用、MFA、按年盘点、409→duplicate、429 退避、删除、体重 |
 | `plan.py` | 匹配与完整性判定、苹果侧孪生折叠 |
+| `keep_export.py` | Keep 导出解析（xlsx 字段 + bundle FIT 的权威 UTC 起点），转换为 Workout |
+| `keep_plan.py` | Keep ↔ Garmin 类型感知去重（跑步含跑步机、健身按时间重叠匹配 "Other"）、垃圾时长判定 |
 | `state.py` | SQLite 账本，幂等重跑 |
 
 ## 测试
 
 ```bash
 .venv/bin/python tests/test_pipeline.py
+.venv/bin/python tests/test_keep.py
 ```
 
-合成 export.zip → 解析 → JSON 往返 → FIT 编码/解码校验（记录数、sport 映射、暂停分段、距离缩放、孪生折叠）→ 迁移计划判定，全链路离线运行，不需要 Garmin 账户。
+合成 export.zip → 解析 → JSON 往返 → FIT 编码/解码校验（记录数、sport 映射、暂停分段、距离缩放、孪生折叠）→ 迁移计划判定，全链路离线运行，不需要 Garmin 账户。`test_keep.py` 用合成的 Keep 导出（xlsx + bundle zip）覆盖 keep-parse/plan/convert 全链路。
 
 ## License
 

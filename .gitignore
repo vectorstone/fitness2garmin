@@ -15,6 +15,7 @@ garmin_tokens.json
 
 # Data & generated files
 data/
+scratch/
 *.fit
 *.tcx
 *.gpx

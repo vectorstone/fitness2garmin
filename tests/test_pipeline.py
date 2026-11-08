@@ -212,14 +212,18 @@ def test_fit(workouts):
 def test_plan(workouts):
     # Garmin inventory: one complete match (skip), one short-duration match
     # (replace), one activity with no Apple counterpart (garmin_only).
-    # 111 matches the run completely -> skip (new top-level shape, hasPolyline)
-    # 222 matches the gym but duration mismatches -> replace (legacy summaryDTO shape)
+    # 111 matches the run via startTimeGMT (its startTimeLocal shows Vietnam
+    # UTC+7, one hour off the Apple +0800 clock — local-clock matching would
+    # miss it) -> skip. Duration/distance/type complete.
+    # 222 matches the gym but duration mismatches -> replace (no startTimeGMT:
+    # legacy summaryDTO shape, naive local fallback path)
     # 333 has no Apple counterpart -> garmin_only
     garmin = [
         {
             "activityId": 111,
             "activityName": "Run",
-            "startTimeLocal": "2026-01-10 07:00:30",
+            "startTimeLocal": "2026-01-10 06:00:30",
+            "startTimeGMT": "2026-01-09 23:00:30",
             "duration": 1790,
             "distance": 5000,
             "hasPolyline": True,

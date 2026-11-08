@@ -1,17 +1,21 @@
 """Build the migration plan: compare Garmin inventory with Apple Health workouts.
 
-Matching rule: Garmin activity startTimeLocal vs Apple workout local start time
-within ±120 s on the same day. A matched pair is 'replace' (delete Garmin +
-upload complete Apple version) when duration or distance disagree beyond
-tolerance; otherwise 'skip'. Unmatched Apple workouts are 'upload'. Garmin-only
-activities are reported but never touched.
+Matching rule: Garmin activity startTimeGMT vs Apple workout start as UTC
+instants, within ±120 s. UTC (not local clock) is essential: Garmin renders an
+activity's startTimeLocal in the timezone of where it happened, so a workout
+recorded while travelling (e.g. Vietnam UTC+7 vs home UTC+8) shows a local
+clock one hour off from the Apple export. Garmin items without startTimeGMT
+fall back to naive local-clock comparison. A matched pair is 'replace' (delete
+Garmin + upload complete Apple version) when duration or distance disagree
+beyond tolerance; otherwise 'skip'. Unmatched Apple workouts are 'upload'.
+Garmin-only activities are reported but never touched.
 """
 
 from __future__ import annotations
 
 from bisect import bisect_left
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .apple_export import Workout, parse_dt
 
@@ -30,6 +34,7 @@ class GarminActivity:
     distance_m: float | None
     type_key: str
     has_gps: bool = False
+    start_utc: datetime | None = None  # aware, parsed from startTimeGMT
     raw: dict = field(default_factory=dict)
 
     @classmethod
@@ -45,6 +50,15 @@ class GarminActivity:
                 start_dt = datetime.strptime(str(start)[:19], "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 start_dt = datetime.min
+        start_utc = None
+        gmt = d.get("startTimeGMT")
+        if gmt:
+            try:
+                start_utc = datetime.strptime(str(gmt)[:19], "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                start_utc = None
         atype = d.get("activityType") or d.get("activityTypeDTO") or {}
         return cls(
             id=d.get("activityId"),
@@ -56,6 +70,7 @@ class GarminActivity:
             or (d.get("summaryDTO") or {}).get("distance"),
             type_key=atype.get("typeKey", ""),
             has_gps=bool(d.get("hasPolyline")),
+            start_utc=start_utc,
             raw=d,
         )
 
@@ -137,9 +152,22 @@ def build_plan(
         (GarminActivity.from_api(d) for d in garmin_items),
         key=lambda a: a.start_local,
     )
-    gstarts = [a.start_local for a in gacts]
+    # UTC-instant matching pool (items with startTimeGMT) and naive local
+    # fallback pool (items without).
+    g_utc = sorted((a for a in gacts if a.start_utc is not None), key=lambda a: a.start_utc)
+    g_utc_starts = [a.start_utc for a in g_utc]
+    g_naive = [a for a in gacts if a.start_utc is None]
+    g_naive_starts = [a.start_local for a in g_naive]
     plan: list[PlanItem] = []
     matched_garmin: set[int] = set()
+
+    def _first_free(starts, pool, lo, hi):
+        i = bisect_left(starts, lo)
+        while i < len(pool) and starts[i] <= hi:
+            if pool[i].id not in matched_garmin:
+                return pool[i]
+            i += 1
+        return None
 
     kept, dropped = _dedupe_apple(workouts)
     for w in workouts:
@@ -156,14 +184,17 @@ def build_plan(
         if not w.hr and not w.gps:
             plan.append(PlanItem(action="no_data", workout=w, reason="no HR/GPS in export"))
             continue
-        w_local = w.start.replace(tzinfo=None)
-        i = bisect_left(gstarts, w_local - MATCH_TOLERANCE)
+        w_aware = w.start if w.start.tzinfo is not None else None
         match = None
-        while i < len(gacts) and gacts[i].start_local <= w_local + MATCH_TOLERANCE:
-            if gacts[i].id not in matched_garmin:
-                match = gacts[i]
-                break
-            i += 1
+        if w_aware is not None:
+            match = _first_free(
+                g_utc_starts, g_utc, w_aware - MATCH_TOLERANCE, w_aware + MATCH_TOLERANCE
+            )
+        if match is None:
+            w_local = w.start.replace(tzinfo=None)
+            match = _first_free(
+                g_naive_starts, g_naive, w_local - MATCH_TOLERANCE, w_local + MATCH_TOLERANCE
+            )
         if match is None:
             plan.append(PlanItem(action="upload", workout=w, reason="not in Garmin"))
             continue

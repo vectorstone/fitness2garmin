@@ -40,10 +40,13 @@ def _d(args) -> Path:
 
 
 def cmd_login(args):
+    import getpass
+
     gateway = GarminGateway(_d(args) / TOKENS)
     email = args.email or input("Garmin email: ")
-    password = args.password or __import__("getpass").getpass("Garmin password: ")
-    gateway.login(email=email, password=password, is_cn=args.cn)
+    password = args.password or getpass.getpass("Garmin password: ")
+    # force: drop any stale tokens (e.g. wrong region) before credential login
+    gateway.login(email=email, password=password, is_cn=args.cn, force=True)
     print("[ok] login succeeded, tokens cached")
 
 

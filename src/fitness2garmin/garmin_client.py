@@ -13,7 +13,14 @@ from garminconnect import Garmin
 class GarminGateway:
     def __init__(self, tokenstore: Path):
         self.tokenstore = tokenstore
+        self.config_path = tokenstore.parent / "config.json"
         self._client: Garmin | None = None
+
+    def _is_cn(self) -> bool:
+        try:
+            return bool(json.loads(self.config_path.read_text()).get("is_cn"))
+        except Exception:  # noqa: BLE001 — missing/corrupt config means global
+            return False
 
     # -- login ---------------------------------------------------------------
 
@@ -21,42 +28,49 @@ class GarminGateway:
         self,
         email: str | None = None,
         password: str | None = None,
-        is_cn: bool = False,
+        is_cn: bool | None = None,
+        force: bool = False,
     ) -> Garmin:
         if self._client is not None:
             return self._client
-        if self.tokenstore.exists():
-            g = Garmin("token", "token", is_cn=is_cn)
+        if is_cn is None:
+            is_cn = self._is_cn()
+        if force:
+            self.tokenstore.unlink(missing_ok=True)
+        elif self.tokenstore.exists():
+            g = Garmin("", "", is_cn=is_cn)
             try:
                 g.login(tokenstore=str(self.tokenstore))
                 self._client = g
                 return g
-            except Exception as e:  # noqa: BLE001 — any auth failure falls back
-                print(f"[garmin] token login failed: {e}")
+            except Exception as e:  # noqa: BLE001 — surface a clear message
+                msg = str(e)
+                hint = ""
+                if "doesn't exist in DB" in msg or "Invalid Username" in msg:
+                    hint = (
+                        "\nHint: your account may be on Garmin China (garmin.cn). "
+                        "Run 'f2g login --cn'."
+                    )
+                raise SystemExit(
+                    f"[garmin] token login failed: {msg}{hint}\n"
+                    f"Run 'f2g login' to re-authenticate."
+                )
         if not (email and password):
             raise SystemExit(
                 "No valid tokenstore. Run 'f2g login' once (interactive)."
             )
         g = Garmin(email, password, is_cn=is_cn, prompt_mfa=self._prompt_mfa)
-        g.login()
-        self._dump_tokens(g)
+        # login(tokenstore=...) persists tokens itself on credential login.
+        g.login(tokenstore=str(self.tokenstore))
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config_path.write_text(json.dumps({"is_cn": is_cn}))
+        print(f"[garmin] tokens saved to {self.tokenstore} (is_cn={is_cn})")
         self._client = g
         return g
 
     @staticmethod
     def _prompt_mfa() -> str:
         return input("MFA code: ")
-
-    def _dump_tokens(self, g: Garmin) -> None:
-        self.tokenstore.parent.mkdir(parents=True, exist_ok=True)
-        dumper = getattr(g, "dump", None)
-        if dumper is None:
-            dumper = getattr(g.client, "dump", None)
-        if dumper is None:
-            print("[garmin] warning: cannot dump tokens; login won't persist")
-            return
-        dumper(str(self.tokenstore))
-        print(f"[garmin] tokens saved to {self.tokenstore}")
 
     # -- inventory -------------------------------------------------------------
 

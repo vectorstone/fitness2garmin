@@ -302,9 +302,12 @@ def _ts_between(record: dict, lo, hi) -> bool:
 
 
 def fit_filename(workout: Workout) -> str:
+    # End time disambiguates same-second twins (Keep writes two workouts with
+    # the same type and start second but different durations).
     ts = workout.start.strftime("%Y-%m-%d_%H%M%S")
+    end = workout.end.strftime("%H%M%S")
     kind = workout.activity_type.replace("HKWorkoutActivityType", "")
-    return f"{ts}_{kind}.fit"
+    return f"{ts}_{end}_{kind}.fit"
 
 
 def write_fit(workout: Workout, out_dir: str | Path) -> Path:

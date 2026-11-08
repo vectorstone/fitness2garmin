@@ -177,6 +177,66 @@ def cmd_clean(args):
           f"re-run 'f2g plan' after deletion)")
 
 
+def _fragment_targets(args) -> list[tuple]:
+    """garmin-only + before 2026 + type 'other' — old broken-import fragments.
+
+    Native Garmin-watch activities keep real types (running/walking/…);
+    import fragments land as auto-named 'other'. Returns (plan_item, activity).
+    """
+    plan = json.loads((_d(args) / PLAN_JSON).read_text())
+    acts = {
+        a.get("activityId"): a
+        for a in json.loads((_d(args) / INVENTORY_JSON).read_text())
+    }
+    targets = []
+    for p in plan:
+        if p["action"] != "garmin_only":
+            continue
+        a = acts.get(p["garmin_id"])
+        if not a:
+            continue
+        start = a.get("startTimeLocal") or ""
+        type_key = (a.get("activityType") or a.get("activityTypeDTO") or {}).get(
+            "typeKey", ""
+        )
+        if start[:4] < "2026" and type_key == "other":
+            targets.append((p, a))
+    return targets
+
+
+def cmd_clean_fragments(args):
+    targets = _fragment_targets(args)
+    if not targets:
+        print("[clean-fragments] no fragments matched (garmin-only, <2026, type 'other')")
+        return
+    print(f"[clean-fragments] {len(targets)} fragment activities to delete:")
+    for p, a in targets:
+        print(
+            f"  - id={p['garmin_id']}  {a.get('activityName', '')[:28]:28} "
+            f"{(a.get('startTimeLocal') or '')[:16]}  "
+            f"{int(a.get('duration') or 0)}s {int(a.get('distance') or 0)}m"
+        )
+    if not args.apply:
+        print("[clean-fragments] dry run — re-run with --apply to actually delete")
+        return
+    gateway = GarminGateway(_d(args) / TOKENS)
+    ledger = Ledger(_d(args) / STATE_DB)
+    done = failed = 0
+    for p, a in targets:
+        try:
+            gateway.delete(p["garmin_id"])
+            ledger.mark(
+                f"garmin@{p['garmin_id']}",
+                "deleted",
+                detail=a.get("activityName", ""),
+            )
+            done += 1
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            print(f"[fail] delete {p['garmin_id']}: {e}")
+    print(f"[ok] deleted {done}, failed {failed}")
+
+
 def cmd_upload(args):
     plan = json.loads((_d(args) / PLAN_JSON).read_text())
     wanted = {"upload"} | ({"replace"} if args.include_replace else set())
@@ -315,6 +375,10 @@ def main(argv=None):
     p = add("clean", help="delete Garmin activities marked 'replace'")
     p.add_argument("--apply", action="store_true", help="actually delete (default dry-run)")
     p.set_defaults(fn=cmd_clean)
+
+    p = add("clean-fragments", help="delete old import fragments (garmin-only, <2026, type 'other')")
+    p.add_argument("--apply", action="store_true", help="actually delete (default dry-run)")
+    p.set_defaults(fn=cmd_clean_fragments)
 
     p = add("upload", help="upload planned FIT files to Garmin")
     p.add_argument("--include-replace", action="store_true",
